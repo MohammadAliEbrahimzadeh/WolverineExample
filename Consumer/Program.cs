@@ -1,3 +1,4 @@
+using Consumer;
 using Wolverine;
 using Wolverine.Attributes;
 using Wolverine.RabbitMQ;
@@ -5,21 +6,17 @@ using Wolverine.RabbitMQ;
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddLogging(logging => logging.AddConsole());
 
+builder.Services.AddHostedService<DeadLetterJob>();
+
 builder.Host.UseWolverine(opts =>
 {
-    opts.UseRabbitMq("amqp://localhost:5672");
+    opts.UseRabbitMq("amqp://localhost:5672").EnableEnhancedDeadLettering();
 
     // Weather queue with DLQ
-    opts.ListenToRabbitQueue("weather_queue")
-        .DeadLetterQueueing(new DeadLetterQueue("weather_deadLetters"));
-
-    opts.ListenToRabbitQueue("weather_deadLetters");
+    opts.ListenToRabbitQueue("weather_queue");
 
     // Email queue with DLQ
-    opts.ListenToRabbitQueue("email_queue")
-        .DeadLetterQueueing(new DeadLetterQueue("email_deadLetters"));
-
-    opts.ListenToRabbitQueue("email_deadLetters");
+    opts.ListenToRabbitQueue("email_queue");
 });
 
 var app = builder.Build();
@@ -45,6 +42,7 @@ public class EmailMessage
 // Weather Handlers
 public class WeatherHandler
 {
+    [RetryNow(typeof(Exception), 3)]
     public void Handle(WeatherForecastMessage message, ILogger<WeatherHandler> logger)
     {
         logger.LogInformation("Processing SMS to {Phone}", message.PhoneNumber);
