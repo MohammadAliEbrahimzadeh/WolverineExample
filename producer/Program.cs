@@ -1,50 +1,69 @@
-using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Wolverine;
 using Wolverine.Attributes;
-using Wolverine.ErrorHandling;
 using Wolverine.RabbitMQ;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 1. Configure Wolverine & RabbitMQ for PUBLISHING only
 builder.Host.UseWolverine(opts =>
 {
-    // Connect to the local Docker RabbitMQ instance
     opts.UseRabbitMq("amqp://localhost:5672").AutoProvision();
 
-    // Route our specific message to a RabbitMQ queue named "weather_queue"
-    opts.PublishMessage<WeatherForecastMessage>().ToRabbitQueue("weather_queue")
-    .DeliverWithin(TimeSpan.FromMinutes(1));
+    // Weather pipeline
+    opts.PublishMessage<WeatherForecastMessage>()
+        .ToRabbitQueue("weather_queue")
+        .DeliverWithin(TimeSpan.FromMinutes(1));
+
+    // Email pipeline  
+    opts.PublishMessage<EmailMessage>()
+        .ToRabbitQueue("email_queue")
+        .DeliverWithin(TimeSpan.FromMinutes(1));
 });
 
 var app = builder.Build();
-
 app.UseHttpsRedirection();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/weatherforecast", async ([FromServices] IMessageBus bus) =>
+// Publish Weather
+app.MapPost("/weather", async (IMessageBus bus, [FromBody] WeatherRequest request) =>
 {
     await bus.PublishAsync(new WeatherForecastMessage
     {
-        Message = "test",
-        Phonenumber ="12345"
+        PhoneNumber = request.Phone,
+        Message = request.Text
     });
+    return Results.Accepted();
+});
 
-    return new { };
+// Publish Email
+app.MapPost("/email", async (IMessageBus bus, [FromBody] EmailRequest request) =>
+{
+    await bus.PublishAsync(new EmailMessage
+    {
+        To = request.To,
+        Subject = request.Subject,
+        Body = request.Body
+    });
+    return Results.Accepted();
 });
 
 app.Run();
 
+// Message Classes - MUST match exactly on Consumer side
 [MessageIdentity("weather_forecast")]
-public class WeatherForecastMessage()
+public class WeatherForecastMessage
 {
-    public string? Phonenumber { get; set; } = "123";
-
-    public string? Message { get; set; } = "Test";
+    public string PhoneNumber { get; set; } = default!;
+    public string Message { get; set; } = default!;
 }
 
+[MessageIdentity("email_notification")]
+public class EmailMessage
+{
+    public string To { get; set; } = default!;
+    public string Subject { get; set; } = default!;
+    public string Body { get; set; } = default!;
+}
+
+// Request DTOs
+public record WeatherRequest(string Phone, string Text);
+public record EmailRequest(string To, string Subject, string Body);

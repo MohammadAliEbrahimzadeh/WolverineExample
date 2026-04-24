@@ -1,57 +1,103 @@
 using Wolverine;
 using Wolverine.Attributes;
-using Wolverine.ErrorHandling;
 using Wolverine.RabbitMQ;
-using Wolverine.Runtime;
-using Wolverine.Runtime.Handlers;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddLogging(logging => logging.AddConsole());
 
-// Add services to the container.
-// This is a good place to add ILogger, etc.
-builder.Services.AddLogging(logging =>
-{
-    logging.AddConsole();
-});
-
-
-// 1. Configure Wolverine to LISTEN only
 builder.Host.UseWolverine(opts =>
 {
-    // Connect to the local Docker RabbitMQ instance
     opts.UseRabbitMq("amqp://localhost:5672");
 
-    // Tell Wolverine to listen to this queue.
-    // Wolverine will automatically create the queue if it does not exist.
-    opts.ListenToRabbitQueue("weather_queue");
+    // Weather queue with DLQ
+    opts.ListenToRabbitQueue("weather_queue")
+        .DeadLetterQueueing(new DeadLetterQueue("weather_deadLetters"));
 
-    opts.Policies.OnException<Exception>().RetryTimes(3);
+    opts.ListenToRabbitQueue("weather_deadLetters");
+
+    // Email queue with DLQ
+    opts.ListenToRabbitQueue("email_queue")
+        .DeadLetterQueueing(new DeadLetterQueue("email_deadLetters"));
+
+    opts.ListenToRabbitQueue("email_deadLetters");
 });
 
 var app = builder.Build();
-
-// We don't need any endpoints, so we just run the host.
-// It will run as a background service listening for messages.
-Console.WriteLine("Wolverine consumer is running. Waiting for messages on 'weather_queue'...");
-Console.WriteLine("Press CTRL+C to exit.");
+Console.WriteLine("Listening on weather_queue and email_queue...");
 await app.RunAsync();
 
+// Message Classes - MUST match Producer exactly (including MessageIdentity)
 [MessageIdentity("weather_forecast")]
-public class WeatherForecastMessage()
+public class WeatherForecastMessage
 {
-    public string? Phonenumber { get; set; } = "123";
-
-    public string? Message { get; set; } = "Test";
+    public string PhoneNumber { get; set; } = default!;
+    public string Message { get; set; } = default!;
 }
 
-// No interfaces required!
-public class WeatherRequestedHandler
+[MessageIdentity("email_notification")]
+public class EmailMessage
 {
-    // Wolverine automatically maps WeatherForecastMessage to this method 
-    // because of the parameter type.
-    public void Handle(WeatherForecastMessage message, ILogger<WeatherRequestedHandler> logger)
+    public string To { get; set; } = default!;
+    public string Subject { get; set; } = default!;
+    public string Body { get; set; } = default!;
+}
+
+// Weather Handlers
+public class WeatherHandler
+{
+    public void Handle(WeatherForecastMessage message, ILogger<WeatherHandler> logger)
     {
-        throw new NotImplementedException();
+        logger.LogInformation("Processing SMS to {Phone}", message.PhoneNumber);
+        throw new InvalidOperationException("SMS service unavailable");
     }
 }
 
+public class WeatherDeadLetterHandler
+{
+    public void Handle(WeatherForecastMessage message, Envelope envelope, ILogger<WeatherDeadLetterHandler> logger)
+    {
+        // Verify this came through DLX (has x-death header)
+        if (!envelope.Headers.TryGetValue("x-death", out var deathInfo))
+        {
+            logger.LogWarning("Message received on DLQ without x-death header");
+            return;
+        }
+
+        logger.LogError("SMS DEAD LETTER: Phone={Phone}, DeathInfo={Death}",
+            message.PhoneNumber,
+            deathInfo);
+
+        // TODO: Save to DB, send alert, etc.
+        // DO NOT THROW HERE or message returns to DLQ
+    }
+}
+
+// Email Handlers
+public class EmailHandler
+{
+    public void Handle(EmailMessage message, ILogger<EmailHandler> logger)
+    {
+        logger.LogInformation("Processing Email to {To}", message.To);
+        throw new InvalidOperationException("Email service unavailable");
+    }
+}
+
+public class EmailDeadLetterHandler
+{
+    public void Handle(EmailMessage message, Envelope envelope, ILogger<EmailDeadLetterHandler> logger)
+    {
+        if (!envelope.Headers.TryGetValue("x-death", out var deathInfo))
+        {
+            logger.LogWarning("Message received on DLQ without x-death header");
+            return;
+        }
+
+        logger.LogError("EMAIL DEAD LETTER: To={To}, Subject={Subject}, DeathInfo={Death}",
+            message.To,
+            message.Subject,
+            deathInfo);
+
+        // TODO: Save to DB, send alert, etc.
+        // DO NOT THROW HERE
+    }
+}
